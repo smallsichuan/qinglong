@@ -12,20 +12,24 @@ import org.apache.commons.compress.archivers.tar.TarArchiveInputStream
 
 object EnvironmentChecker {
     private const val ROOTFS_DIR = "linux-rootfs"
-    private const val PROOT_FILE = "proot"
     private const val READY_MARKER = "environment_ready"
     private const val APK_ARCHIVE = "linux-rootfs.tar.gz"
-    private const val PROOT_ASSET = "proot-aarch64"
+    private const val PROOT_LIBRARY = "libproot.so"
     private val mainHandler = Handler(Looper.getMainLooper())
 
     private fun rootfs(context: Context) = File(context.filesDir, ROOTFS_DIR)
-    private fun proot(context: Context) = File(context.filesDir, PROOT_FILE)
+
+    // Android may mount the normal app data directory with noexec. Native
+    // libraries are extracted by PackageManager to nativeLibraryDir with
+    // executable permissions, so the PRoot executable lives there.
+    private fun proot(context: Context) =
+        File(context.applicationInfo.nativeLibraryDir, PROOT_LIBRARY)
 
     fun isPRootInstalled(context: Context): Boolean =
-        proot(context).canExecute() && File(rootfs(context), "bin/sh").isFile
+        proot(context).isFile && proot(context).canExecute() && File(rootfs(context), "bin/sh").isFile
 
     fun isNodeJSInstalled(context: Context): Boolean =
-        isPRootInstalled(context) && File(rootfs(context), "usr/bin/node").canExecute()
+        isPRootInstalled(context) && File(rootfs(context), "usr/bin/node").isFile
 
     fun isQingLongInstalled(context: Context): Boolean {
         if (!isPRootInstalled(context)) return false
@@ -84,15 +88,15 @@ object EnvironmentChecker {
     private fun installPRootBlocking(context: Context): Boolean {
         return try {
             val p = proot(context)
-            if (!p.exists()) {
-                context.assets.open(PROOT_ASSET).use { input ->
-                    FileOutputStream(p).use { output -> input.copyTo(output) }
-                }
+            if (!p.isFile) {
+                Timber.e("PRoot native library is missing: ${p.absolutePath}")
+                return false
             }
             p.setExecutable(true, false)
 
             val rf = rootfs(context)
             if (!File(rf, "bin/sh").isFile) {
+                if (rf.exists()) rf.deleteRecursively()
                 context.assets.open(APK_ARCHIVE).use { extractTarGz(it, rf) }
             }
 
@@ -144,7 +148,7 @@ object EnvironmentChecker {
     fun runInLinux(context: Context, command: String): Boolean {
         val p = proot(context)
         val rf = rootfs(context)
-        if (!p.canExecute() || !File(rf, "bin/sh").isFile) return false
+        if (!p.isFile || !p.canExecute() || !File(rf, "bin/sh").isFile) return false
 
         return try {
             val pb = ProcessBuilder(
