@@ -1,165 +1,156 @@
 package com.qinglong.panel.utils
 
 import android.content.Context
+import android.os.Build
+import android.os.Handler
+import android.os.Looper
+import android.system.Os
 import timber.log.Timber
 import java.io.File
+import java.io.FileInputStream
+import java.io.FileOutputStream
+import java.util.zip.GZIPInputStream
+import org.apache.commons.compress.archivers.tar.TarArchiveInputStream
 
 object EnvironmentChecker {
+    private const val ROOTFS_DIR = "linux-rootfs"
+    private const val PROOT_FILE = "proot"
+    private const val READY_MARKER = "environment_ready"
+    private const val APK_ARCHIVE = "linux-rootfs.tar.gz"
+    private const val PROOT_ASSET = "proot-aarch64"
+    private val mainHandler = Handler(Looper.getMainLooper())
 
-    private const val PROOT_MARKER = "proot_installed"
-    private const val NODEJS_MARKER = "nodejs_installed"
-    private const val QINGLONG_MARKER = "qinglong_installed"
+    fun isPRootInstalled(context: Context): Boolean =
+        File(context.filesDir, PROOT_FILE).canExecute() && File(context.filesDir, ROOTFS_DIR + "/bin/sh").exists()
 
-    fun isPRootInstalled(context: Context): Boolean {
-        val markerFile = File(context.filesDir, PROOT_MARKER)
-        return markerFile.exists() && isPRootExecutableAvailable()
-    }
+    fun isNodeJSInstalled(context: Context): Boolean =
+        File(context.filesDir, READY_MARKER).exists() && File(context.filesDir, ROOTFS_DIR + "/usr/bin/node").exists()
 
-    fun isNodeJSInstalled(context: Context): Boolean {
-        val markerFile = File(context.filesDir, NODEJS_MARKER)
-        return markerFile.exists() && isNodeJSAvailable()
-    }
-
-    fun isQingLongInstalled(context: Context): Boolean {
-        val markerFile = File(context.filesDir, QINGLONG_MARKER)
-        val qinglongDir = File(context.filesDir, "qinglong")
-        return markerFile.exists() && qinglongDir.exists()
-    }
-
-    private fun isPRootExecutableAvailable(): Boolean {
-        return try {
-            val process = Runtime.getRuntime().exec(arrayOf("proot", "--version"))
-            process.waitFor()
-            process.exitValue() == 0
-        } catch (e: Exception) {
-            false
-        }
-    }
-
-    private fun isNodeJSAvailable(): Boolean {
-        return try {
-            val process = Runtime.getRuntime().exec(arrayOf("node", "--version"))
-            process.waitFor()
-            process.exitValue() == 0
-        } catch (e: Exception) {
-            false
-        }
-    }
+    fun isQingLongInstalled(context: Context): Boolean =
+        File(context.filesDir, READY_MARKER).exists() && File(context.filesDir, ROOTFS_DIR + "/usr/local/bin/qinglong").exists()
 
     fun installPRoot(context: Context, callback: (Boolean) -> Unit) {
         Thread {
-            try {
-                val success = installPRootSync(context)
-                callback(success)
+            val ok = try {
+                val proot = File(context.filesDir, PROOT_FILE)
+                if (!proot.exists()) context.assets.open(PROOT_ASSET).use { input ->
+                    FileOutputStream(proot).use { output -> input.copyTo(output) }
+                }
+                proot.setExecutable(true, false)
+                val rootfs = File(context.filesDir, ROOTFS_DIR)
+                if (!File(rootfs, "bin/sh").exists()) {
+                    context.assets.open(APK_ARCHIVE).use { input ->
+                        extractTarGz(input, rootfs)
+                    }
+                }
+                File(rootfs, "etc/resolv.conf").parentFile?.mkdirs()
+                File(rootfs, "etc/resolv.conf").writeText("nameserver 1.1.1.1\nnameserver 8.8.8.8\n")
+                true
             } catch (e: Exception) {
-                Timber.e(e, "Failed to install PRoot")
-                callback(false)
+                Timber.e(e, "Linux environment installation failed")
+                false
             }
+            mainHandler.post { callback(ok) }
         }.start()
-    }
-
-    private fun installPRootSync(context: Context): Boolean {
-        return try {
-            extractAssets(context, "linux-rootfs.tar.gz", context.filesDir)
-            File(context.filesDir, PROOT_MARKER).createNewFile()
-            true
-        } catch (e: Exception) {
-            Timber.e(e, "PRoot installation failed")
-            false
-        }
     }
 
     fun installNodeJS(context: Context, callback: (Boolean) -> Unit) {
         Thread {
-            try {
-                val success = installNodeJSSync(context)
-                callback(success)
-            } catch (e: Exception) {
-                Timber.e(e, "Failed to install Node.js")
-                callback(false)
-            }
+            val ok = runInLinux(context, "apk update && apk add --no-cache nodejs npm python3 py3-pip bash curl ca-certificates git")
+            mainHandler.post { callback(ok) }
         }.start()
-    }
-
-    private fun installNodeJSSync(context: Context): Boolean {
-        return try {
-            val nodeDir = File(context.filesDir, "nodejs")
-            if (!nodeDir.exists()) nodeDir.mkdirs()
-
-            extractAssets(context, "nodejs", nodeDir)
-
-            val nodeBinary = File(nodeDir, "bin/node")
-            if (nodeBinary.exists()) {
-                nodeBinary.setExecutable(true)
-            }
-
-            File(context.filesDir, NODEJS_MARKER).createNewFile()
-            true
-        } catch (e: Exception) {
-            Timber.e(e, "Node.js installation failed")
-            false
-        }
     }
 
     fun installQingLong(context: Context, callback: (Boolean) -> Unit) {
         Thread {
+            val command = "mkdir -p /ql/data /ql/scripts /ql/log && export QL_DIR=/ql QL_DATA_DIR=/ql/data QL_PORT=5700 && npm install -g @whyour/qinglong && qinglong --version >/dev/null 2>&1 || true"
+            val ok = runInLinux(context, command) && File(context.filesDir, ROOTFS_DIR + "/usr/local/bin/qinglong").exists()
+            if (ok) File(context.filesDir, READY_MARKER).createNewFile()
+            mainHandler.post { callback(ok) }
+        }.start()
+    }
+
+    fun initialize(context: Context, callback: (Boolean, String) -> Unit) {
+        Thread {
             try {
-                val success = installQingLongSync(context)
-                callback(success)
+                if (!isPRootInstalled(context)) {
+                    if (!installPRootBlocking(context)) return@Thread callbackMain(callback, false, "Linux 环境安装失败")
+                }
+                if (!isNodeJSInstalled(context)) {
+                    if (!runInLinux(context, "apk update && apk add --no-cache nodejs npm python3 py3-pip bash curl ca-certificates git"))
+                        return@Thread callbackMain(callback, false, "Node.js/Python 安装失败")
+                }
+                if (!isQingLongInstalled(context)) {
+                    val cmd = "mkdir -p /ql/data /ql/scripts /ql/log && export QL_DIR=/ql QL_DATA_DIR=/ql/data QL_PORT=5700 && npm install -g @whyour/qinglong"
+                    if (!runInLinux(context, cmd)) return@Thread callbackMain(callback, false, "青龙安装失败")
+                    File(context.filesDir, READY_MARKER).createNewFile()
+                }
+                callbackMain(callback, true, "环境就绪")
             } catch (e: Exception) {
-                Timber.e(e, "Failed to install QingLong")
-                callback(false)
+                Timber.e(e, "Environment initialization failed")
+                callbackMain(callback, false, e.message ?: "环境初始化失败")
             }
         }.start()
     }
 
-    private fun installQingLongSync(context: Context): Boolean {
+    private fun installPRootBlocking(context: Context): Boolean {
+        val proot = File(context.filesDir, PROOT_FILE)
+        if (!proot.exists()) context.assets.open(PROOT_ASSET).use { input -> FileOutputStream(proot).use { output -> input.copyTo(output) } }
+        proot.setExecutable(true, false)
+        val rootfs = File(context.filesDir, ROOTFS_DIR)
+        if (!File(rootfs, "bin/sh").exists()) context.assets.open(APK_ARCHIVE).use { extractTarGz(it, rootfs) }
+        File(rootfs, "etc/resolv.conf").apply { parentFile?.mkdirs(); writeText("nameserver 1.1.1.1\nnameserver 8.8.8.8\n") }
+        return proot.canExecute() && File(rootfs, "bin/sh").exists()
+    }
+
+    fun runInLinux(context: Context, command: String): Boolean {
+        val proot = File(context.filesDir, PROOT_FILE)
+        val rootfs = File(context.filesDir, ROOTFS_DIR)
+        if (!proot.canExecute() || !File(rootfs, "bin/sh").exists()) return false
         return try {
-            val qinglongDir = File(context.filesDir, "qinglong")
-            if (!qinglongDir.exists()) qinglongDir.mkdirs()
-
-            extractAssets(context, "qinglong", qinglongDir)
-
-            File(context.filesDir, QINGLONG_MARKER).createNewFile()
-            true
+            val pb = ProcessBuilder(
+                proot.absolutePath, "--kill-on-exit", "-0", "-r", rootfs.absolutePath,
+                "-b", "/dev", "-b", "/proc", "-b", "/sys",
+                "-w", "/root", "/bin/sh", "-lc", command
+            )
+            pb.environment()["HOME"] = "/root"
+            pb.environment()["LANG"] = "C.UTF-8"
+            pb.redirectErrorStream(true)
+            val process = pb.start()
+            val output = process.inputStream.bufferedReader().readText()
+            val code = process.waitFor()
+            if (code != 0) Timber.e("Linux command failed ($code): $output")
+            else Timber.i("Linux command completed: $output")
+            code == 0
         } catch (e: Exception) {
-            Timber.e(e, "QingLong installation failed")
+            Timber.e(e, "Failed to execute Linux command")
             false
         }
     }
 
-    private fun extractAssets(context: Context, assetName: String, targetDir: File): Boolean {
-        return try {
-            val assetManager = context.assets
+    private fun callbackMain(callback: (Boolean, String) -> Unit, ok: Boolean, msg: String) =
+        mainHandler.post { callback(ok, msg) }
 
-            try {
-                val files = assetManager.list(assetName)
-                if (files != null) {
-                    val dir = File(targetDir, assetName)
-                    if (!dir.exists()) dir.mkdirs()
-
-                    for (file in files) {
-                        extractAssets(context, "$assetName/$file", targetDir)
-                    }
-                } else {
-                    assetManager.open(assetName).use { input ->
-                        File(targetDir, File(assetName).name).outputStream().use { output ->
-                            input.copyTo(output)
-                        }
-                    }
+    private fun extractTarGz(input: java.io.InputStream, target: File) {
+        target.mkdirs()
+        TarArchiveInputStream(GZIPInputStream(input.buffered())).use { tar ->
+            var entry = tar.nextTarEntry
+            val root = target.canonicalFile
+            while (entry != null) {
+                val out = File(target, entry.name).canonicalFile
+                if (!out.path.startsWith(root.path + File.separator) && out != root) throw SecurityException("Unsafe archive path")
+                if (entry.isDirectory) out.mkdirs()
+                else if (entry.isSymbolicLink) {
+                    out.parentFile?.mkdirs()
+                    if (out.exists() || out.isSymbolicLink) out.delete()
+                    Os.symlink(entry.linkName, out.path)
+                } else if (entry.isFile) {
+                    out.parentFile?.mkdirs()
+                    FileOutputStream(out).use { tar.copyTo(it) }
+                    out.setExecutable((entry.mode and 64) != 0 || (entry.mode and 8) != 0 || (entry.mode and 1) != 0, false)
                 }
-            } catch (e: Exception) {
-                assetManager.open(assetName).use { input ->
-                    File(targetDir, File(assetName).name).outputStream().use { output ->
-                        input.copyTo(output)
-                    }
-                }
+                entry = tar.nextTarEntry
             }
-
-            true
-        } catch (e: Exception) {
-            Timber.e(e, "Failed to extract assets: $assetName")
-            false
         }
     }
 }
