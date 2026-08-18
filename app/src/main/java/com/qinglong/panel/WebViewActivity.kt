@@ -7,21 +7,16 @@ import android.webkit.*
 import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
 import com.qinglong.panel.databinding.ActivityWebviewBinding
-import com.qinglong.panel.utils.LocalServerManager
 
 class WebViewActivity : AppCompatActivity() {
 
     private lateinit var binding: ActivityWebviewBinding
-    private lateinit var localServerManager: LocalServerManager
 
     @SuppressLint("SetJavaScriptEnabled")
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         binding = ActivityWebviewBinding.inflate(layoutInflater)
         setContentView(binding.root)
-
-        localServerManager = LocalServerManager(this)
-
         setupWebView()
         loadQingLongPanel()
     }
@@ -29,7 +24,6 @@ class WebViewActivity : AppCompatActivity() {
     @SuppressLint("SetJavaScriptEnabled")
     private fun setupWebView() {
         val webView = binding.webView
-
         webView.settings.apply {
             javaScriptEnabled = true
             javaScriptCanOpenWindowsAutomatically = true
@@ -62,17 +56,10 @@ class WebViewActivity : AppCompatActivity() {
                 error: WebResourceError?
             ) {
                 super.onReceivedError(view, request, error)
-                if (request?.isForMainFrame == true) {
-                    showError("无法连接到青龙面板")
-                }
+                if (request?.isForMainFrame == true) showError("无法连接到青龙面板")
             }
 
-            override fun shouldOverrideUrlLoading(
-                view: WebView?,
-                request: WebResourceRequest?
-            ): Boolean {
-                return false
-            }
+            override fun shouldOverrideUrlLoading(view: WebView?, request: WebResourceRequest?): Boolean = false
         }
 
         webView.webChromeClient = object : WebChromeClient() {
@@ -85,22 +72,29 @@ class WebViewActivity : AppCompatActivity() {
 
     private fun loadQingLongPanel() {
         binding.progressBar.visibility = View.VISIBLE
-        binding.tvLoadingStatus.text = "正在启动本地服务器..."
+        binding.tvLoadingStatus.text = "正在连接本地青龙服务..."
 
-        localServerManager.startServer(
-            port = 5700,
-            onStart = { success, message ->
-                runOnUiThread {
-                    if (success) {
-                        binding.tvLoadingStatus.text = "服务器已启动，正在加载面板..."
-                        val url = "http://127.0.0.1:5700"
-                        binding.webView.loadUrl(url)
-                    } else {
-                        showError(message)
-                    }
+        Thread {
+            var ready = false
+            for (i in 0 until 60) {
+                try {
+                    java.net.Socket("127.0.0.1", 5700).use { }
+                    ready = true
+                    break
+                } catch (_: Exception) {
+                    Thread.sleep(500)
                 }
             }
-        )
+
+            runOnUiThread {
+                if (ready) {
+                    binding.tvLoadingStatus.text = "正在加载青龙面板..."
+                    binding.webView.loadUrl("http://127.0.0.1:5700/")
+                } else {
+                    showError("青龙服务尚未启动，请返回主页重试")
+                }
+            }
+        }.start()
     }
 
     private fun showError(message: String) {
@@ -109,17 +103,14 @@ class WebViewActivity : AppCompatActivity() {
         Toast.makeText(this, message, Toast.LENGTH_LONG).show()
     }
 
+    @Deprecated("Deprecated in Java")
     override fun onBackPressed() {
-        if (binding.webView.canGoBack()) {
-            binding.webView.goBack()
-        } else {
-            super.onBackPressed()
-        }
+        if (binding.webView.canGoBack()) binding.webView.goBack() else super.onBackPressed()
     }
 
     override fun onDestroy() {
-        super.onDestroy()
+        binding.webView.stopLoading()
         binding.webView.destroy()
-        localServerManager.stopServer()
+        super.onDestroy()
     }
 }
