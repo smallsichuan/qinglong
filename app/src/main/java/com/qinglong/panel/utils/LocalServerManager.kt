@@ -17,6 +17,9 @@ class LocalServerManager(private val context: Context) {
     private var serverScope: CoroutineScope? = null
     private val mainHandler = Handler(Looper.getMainLooper())
 
+    private fun rootfs() = File(context.filesDir, "linux-rootfs")
+    private fun proot() = File(context.applicationInfo.nativeLibraryDir, "libproot.so")
+
     fun startServer(port: Int, onStart: (Boolean, String) -> Unit) {
         stopServer()
         serverScope = CoroutineScope(Dispatchers.IO + SupervisorJob())
@@ -31,8 +34,17 @@ class LocalServerManager(private val context: Context) {
                     return@launch
                 }
 
-                val rootfs = File(context.filesDir, "linux-rootfs")
-                val proot = File(context.filesDir, "proot")
+                val rootfs = rootfs()
+                val proot = proot()
+                if (!proot.isFile || !proot.canExecute()) {
+                    post(onStart, false, "PRoot 不可执行")
+                    return@launch
+                }
+                if (!File(rootfs, "bin/sh").isFile) {
+                    post(onStart, false, "Linux 环境不完整")
+                    return@launch
+                }
+
                 File(rootfs, "ql/data").mkdirs()
 
                 val command = """
@@ -41,7 +53,6 @@ class LocalServerManager(private val context: Context) {
                     export QL_DIR=/ql
                     export QL_DATA_DIR=/ql/data
                     export QL_PORT=$port
-                    export QlPort=$port
                     cd /ql
                     exec qinglong
                 """.trimIndent()
