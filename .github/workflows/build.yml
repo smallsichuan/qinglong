@@ -2,20 +2,15 @@ name: Build Android APK
 
 on:
   push:
-    branches:
-      - main
-      - master
-    tags:
-      - 'v*'
+    branches: [ main, master ]
+    tags: [ 'v*' ]
   pull_request:
-    branches:
-      - main
-      - master
+    branches: [ main, master ]
   workflow_dispatch:
 
 jobs:
   build:
-    name: Build Android APK
+    name: Build Android APK (ARM64)
     runs-on: ubuntu-22.04
 
     steps:
@@ -35,108 +30,69 @@ jobs:
       - name: Install Android SDK
         run: |
           yes | sdkmanager --licenses || true
-          sdkmanager \
-            "platform-tools" \
-            "platforms;android-34" \
-            "build-tools;34.0.0"
+          sdkmanager "platform-tools" "platforms;android-34" "build-tools;34.0.0"
 
       - name: Setup Gradle 8.2
         uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: '8.2'
 
-      - name: Check Gradle project
-        run: |
-          echo "===== Java ====="
-          java -version
-
-          echo "===== Gradle ====="
-          gradle --version
-
-          echo "===== Project ====="
-          ls -la
-
-          echo "===== App ====="
-          ls -la app
-
-          echo "===== Wrapper directory ====="
-          ls -la gradle/wrapper || true
-
       - name: Generate Gradle Wrapper
         run: |
           gradle wrapper --gradle-version 8.2 --distribution-type bin
-
           chmod +x gradlew
 
-          echo "===== Wrapper generated ====="
-          ls -la gradlew
-          ls -la gradle/wrapper
-
-      - name: Verify Gradle Wrapper
+      - name: Prepare embedded Linux environment
+        shell: bash
         run: |
-          ./gradlew --version
+          set -euo pipefail
+          mkdir -p app/src/main/assets
+          TMP="$RUNNER_TEMP/qinglong-bootstrap"
+          mkdir -p "$TMP"
 
-      - name: Clean project
-        run: |
-          ./gradlew clean --no-daemon --stacktrace
+          PROOT_URL="https://github.com/proot-me/proot/releases/download/v5.3.0/proot-v5.3.0-aarch64-static"
+          PROOT="$TMP/proot-aarch64"
+          curl -fL --retry 5 --retry-all-errors "$PROOT_URL" -o "$PROOT"
+          chmod +x "$PROOT"
+
+          ROOTFS_URL="https://dl-cdn.alpinelinux.org/alpine/v3.24/releases/aarch64/alpine-minirootfs-3.24.1-aarch64.tar.gz"
+          ROOTFS="$TMP/linux-rootfs.tar.gz"
+          curl -fL --retry 5 --retry-all-errors "$ROOTFS_URL" -o "$ROOTFS"
+          curl -fL --retry 5 --retry-all-errors "${ROOTFS_URL}.sha256" -o "$ROOTFS.sha256"
+          (cd "$TMP" && sha256sum -c linux-rootfs.tar.gz.sha256)
+
+          cp "$PROOT" app/src/main/assets/proot-aarch64
+          cp "$ROOTFS" app/src/main/assets/linux-rootfs.tar.gz
+
+          echo "===== Embedded assets ====="
+          ls -lh app/src/main/assets
+
+      - name: Clean
+        run: ./gradlew clean --no-daemon --stacktrace
 
       - name: Build Debug APK
-        run: |
-          ./gradlew :app:assembleDebug \
-            --no-daemon \
-            --stacktrace \
-            --info
+        run: ./gradlew :app:assembleDebug --no-daemon --stacktrace --info
 
       - name: Verify APK
         run: |
-          echo "===== APK search ====="
-
-          find . \
-            -type f \
-            -name "*.apk" \
-            -print
-
-          echo "===== Expected APK ====="
-
-          ls -lah app/build/outputs/apk/debug/ || true
-
+          set -e
           APK="app/build/outputs/apk/debug/app-debug.apk"
-
-          if [ ! -f "$APK" ]; then
-            echo "❌ APK was not generated."
-
-            echo "===== Build outputs ====="
-            find app/build/outputs \
-              -type f \
-              -print 2>/dev/null || true
-
-            echo "===== Build directory ====="
-            find app/build \
-              -maxdepth 5 \
-              -type f \
-              -print 2>/dev/null || true
-
-            exit 1
-          fi
-
-          echo "✅ APK generated successfully"
-
+          test -f "$APK"
+          echo "APK generated:"
           ls -lh "$APK"
+          echo "APK contains embedded Linux assets:"
+          unzip -l "$APK" | grep -E 'assets/(proot-aarch64|linux-rootfs.tar.gz)' || true
 
       - name: Prepare APK
         run: |
           mkdir -p output
-
-          cp \
-            app/build/outputs/apk/debug/app-debug.apk \
-            output/qinglong-android-debug.apk
-
+          cp app/build/outputs/apk/debug/app-debug.apk output/qinglong-android-arm64-debug.apk
           ls -lh output/
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
-          name: qinglong-android-apk
-          path: output/qinglong-android-debug.apk
+          name: qinglong-android-arm64-apk
+          path: output/qinglong-android-arm64-debug.apk
           retention-days: 30
           if-no-files-found: error
