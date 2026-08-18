@@ -50,11 +50,14 @@ jobs:
           TMP="$RUNNER_TEMP/qinglong-bootstrap"
           mkdir -p "$TMP"
 
-          PROOT_URL="https://github.com/proot-me/proot/releases/download/v5.3.0/proot-v5.3.0-aarch64-static"
+          echo "===== Download PRoot ARM64 ====="
+          PROOT_URL="https://sourceforge.net/projects/proot.mirror/files/v5.3.0/proot-v5.3.0-aarch64-static/download"
           PROOT="$TMP/proot-aarch64"
           curl -fL --retry 5 --retry-all-errors "$PROOT_URL" -o "$PROOT"
           chmod +x "$PROOT"
+          file "$PROOT"
 
+          echo "===== Download Alpine ARM64 rootfs ====="
           ROOTFS_URL="https://dl-cdn.alpinelinux.org/alpine/v3.24/releases/aarch64/alpine-minirootfs-3.24.1-aarch64.tar.gz"
           ROOTFS="$TMP/linux-rootfs.tar.gz"
           curl -fL --retry 5 --retry-all-errors "$ROOTFS_URL" -o "$ROOTFS"
@@ -75,13 +78,21 @@ jobs:
 
       - name: Verify APK
         run: |
-          set -e
+          set -euo pipefail
           APK="app/build/outputs/apk/debug/app-debug.apk"
           test -f "$APK"
-          echo "APK generated:"
+
+          echo "===== APK ====="
           ls -lh "$APK"
-          echo "APK contains embedded Linux assets:"
-          unzip -l "$APK" | grep -E 'assets/(proot-aarch64|linux-rootfs.tar.gz)' || true
+
+          echo "===== APK archive test ====="
+          unzip -t "$APK" >/dev/null
+
+          echo "===== Embedded assets in APK ====="
+          unzip -l "$APK" | grep -E 'assets/(proot-aarch64|linux-rootfs.tar.gz)'
+
+          echo "===== APK package information ====="
+          "$ANDROID_HOME/build-tools/34.0.0/aapt" dump badging "$APK" | head -20
 
       - name: Prepare APK
         run: |
