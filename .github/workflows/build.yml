@@ -46,7 +46,10 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          mkdir -p app/src/main/assets
+
+          rm -rf app/src/main/assets app/src/main/jniLibs
+          mkdir -p app/src/main/assets app/src/main/jniLibs/arm64-v8a
+
           TMP="$RUNNER_TEMP/qinglong-bootstrap"
           mkdir -p "$TMP"
 
@@ -54,21 +57,27 @@ jobs:
           PROOT_URL="https://sourceforge.net/projects/proot.mirror/files/v5.3.0/proot-v5.3.0-aarch64-static/download"
           PROOT="$TMP/proot-aarch64"
           curl -fL --retry 5 --retry-all-errors "$PROOT_URL" -o "$PROOT"
-          chmod +x "$PROOT"
+          test -s "$PROOT"
           file "$PROOT"
+          chmod +x "$PROOT"
+          cp "$PROOT" app/src/main/jniLibs/arm64-v8a/libproot.so
 
           echo "===== Download Alpine ARM64 rootfs ====="
-          ROOTFS_URL="https://dl-cdn.alpinelinux.org/alpine/v3.24/releases/aarch64/alpine-minirootfs-3.24.1-aarch64.tar.gz"
-          ROOTFS="$TMP/linux-rootfs.tar.gz"
+          ROOTFS_NAME="alpine-minirootfs-3.24.1-aarch64.tar.gz"
+          ROOTFS_URL="https://dl-cdn.alpinelinux.org/alpine/v3.24/releases/aarch64/$ROOTFS_NAME"
+          ROOTFS="$TMP/$ROOTFS_NAME"
           curl -fL --retry 5 --retry-all-errors "$ROOTFS_URL" -o "$ROOTFS"
-          curl -fL --retry 5 --retry-all-errors "${ROOTFS_URL}.sha256" -o "$ROOTFS.sha256"
-          (cd "$TMP" && sha256sum -c linux-rootfs.tar.gz.sha256)
+          test -s "$ROOTFS"
 
-          cp "$PROOT" app/src/main/assets/proot-aarch64
+          echo "===== Verify Alpine rootfs checksum ====="
+          curl -fL --retry 5 --retry-all-errors "${ROOTFS_URL}.sha256" -o "$ROOTFS.sha256"
+          (cd "$TMP" && sha256sum -c "$ROOTFS_NAME.sha256")
+
           cp "$ROOTFS" app/src/main/assets/linux-rootfs.tar.gz
 
-          echo "===== Embedded assets ====="
+          echo "===== Embedded files ====="
           ls -lh app/src/main/assets
+          ls -lh app/src/main/jniLibs/arm64-v8a
 
       - name: Clean
         run: ./gradlew clean --no-daemon --stacktrace
@@ -88,8 +97,8 @@ jobs:
           echo "===== APK archive test ====="
           unzip -t "$APK" >/dev/null
 
-          echo "===== Embedded assets in APK ====="
-          unzip -l "$APK" | grep -E 'assets/(proot-aarch64|linux-rootfs.tar.gz)'
+          echo "===== Embedded files in APK ====="
+          unzip -l "$APK" | grep -E '(lib/arm64-v8a/libproot.so|assets/linux-rootfs.tar.gz)'
 
           echo "===== APK package information ====="
           "$ANDROID_HOME/build-tools/34.0.0/aapt" dump badging "$APK" | head -20
